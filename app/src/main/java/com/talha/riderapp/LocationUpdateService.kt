@@ -26,6 +26,7 @@ class LocationUpdateService : Service() {
     private var restaurantId: String = ""
     private var orderId: String = ""
     private var orderNumber: String = ""
+    private var lastLoc: android.location.Location? = null
 
     companion object {
         const val CHANNEL_ID = "rider_location_status"
@@ -81,6 +82,12 @@ class LocationUpdateService : Service() {
         callback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 val loc = result.lastLocation ?: return
+                // Keep a running total of today's distance for the Home / Earnings screens.
+                lastLoc?.let { prev ->
+                    val d = prev.distanceTo(loc)
+                    if (d in 5f..500f) RiderPrefs.addDistance(this@LocationUpdateService, d.toDouble())
+                }
+                lastLoc = loc
                 pushLocation(loc.latitude, loc.longitude)
             }
         }

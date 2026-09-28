@@ -1,5 +1,3 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
-
 package com.talha.riderapp
 
 import android.Manifest
@@ -9,32 +7,40 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationServices
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.ListenerRegistration
 import org.osmdroid.util.GeoPoint
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class DeliveryOrder(
     val id: String = "",
@@ -43,11 +49,26 @@ data class DeliveryOrder(
     val customerPhone: String = "",
     val customerAddress: String = "",
     val status: String = "",
+    val riderStatus: String = "",
+    val riderId: String = "",
+    val riderName: String = "",
     val total: Double = 0.0,
     val itemsSummary: String = "",
     val deliveryLat: Double? = null,
-    val deliveryLng: Double? = null
+    val deliveryLng: Double? = null,
+    val createdAt: Long = 0L,
+    val deliveredAt: Long = 0L
 )
+
+private val ACTIVE_RIDER_STATUSES = setOf("ACCEPTED", "ARRIVED", "PICKED_UP", "ON_THE_WAY")
+
+private fun isToday(ms: Long): Boolean {
+    val f = SimpleDateFormat("yyyyMMdd", Locale.US)
+    return f.format(Date(ms)) == f.format(Date())
+}
+
+private fun formatKm(meters: Double): String =
+    if (meters >= 1000) String.format(Locale.US, "%.1f km", meters / 1000) else "${meters.toInt()} m"
 
 class MainActivity : ComponentActivity() {
 
@@ -65,8 +86,7 @@ class MainActivity : ComponentActivity() {
 
             val locationPermissionLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestMultiplePermissions()
-            ) { /* handled by button state re-check */ }
-
+            ) { }
             val notifPermissionLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestPermission()
             ) { }
@@ -91,8 +111,8 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            MaterialTheme(colorScheme = riderColorScheme()) {
-                Surface(Modifier.fillMaxSize()) {
+            RiderTheme {
+                GlassBackground {
                     when {
                         !loggedIn -> LoginScreen(
                             loading = loading,
@@ -105,12 +125,13 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                         restaurantId == null -> Box(Modifier.fillMaxSize(), Alignment.Center) {
-                            if (errorMsg != null) Text(errorMsg!!, color = Color.Red) else CircularProgressIndicator()
+                            if (errorMsg != null) Text(errorMsg!!, color = RiderColors.Red) else CircularProgressIndicator(color = RiderColors.Blue)
                         }
-                        else -> OrdersScreen(
+                        else -> RiderShell(
                             restaurantId = restaurantId!!,
                             firestore = firestore,
                             onLogout = {
+                                LocationUpdateService.stop(this@MainActivity)
                                 auth.signOut()
                                 loggedIn = false
                                 restaurantId = null
@@ -123,71 +144,74 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable
-fun riderColorScheme() = lightColorScheme(
-    primary = Color(0xFFFF6B00),
-    secondary = Color(0xFF1A1A2E)
-)
+// ───────────────────────────── Login ─────────────────────────────
 
 @Composable
 fun LoginScreen(loading: Boolean, error: String?, onLogin: (String, String) -> Unit) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
 
-    Column(
-        Modifier.fillMaxSize().padding(28.dp),
-        verticalArrangement = Arrangement.Center
-    ) {
-        Icon(Icons.Default.DeliveryDining, contentDescription = null, tint = Color(0xFFFF6B00), modifier = Modifier.size(64.dp))
-        Spacer(Modifier.height(12.dp))
-        Text("Rider Login", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text("Use the same email/password you use for the restaurant's main app.", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-        Spacer(Modifier.height(24.dp))
-        OutlinedTextField(
-            value = email, onValueChange = { email = it },
-            label = { Text("Email") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-            modifier = Modifier.fillMaxWidth(), singleLine = true
+    Column(Modifier.fillMaxSize().padding(Spacing.XL), verticalArrangement = Arrangement.Center) {
+        Box(
+            Modifier.size(72.dp).background(RiderColors.Blue.copy(alpha = 0.2f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) { Icon(Icons.Default.DeliveryDining, null, tint = RiderColors.Cyan, modifier = Modifier.size(40.dp)) }
+        Spacer(Modifier.height(Spacing.LG))
+        Text("Rider Delivery", color = RiderColors.TextPrimary, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+        Text(
+            "Sign in with the same email and password as the Restaurant POS app.",
+            color = RiderColors.TextSecondary, fontSize = 13.sp
         )
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value = password, onValueChange = { password = it },
-            label = { Text("Password") },
-            visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            modifier = Modifier.fillMaxWidth(), singleLine = true
-        )
-        if (error != null) {
-            Spacer(Modifier.height(8.dp))
-            Text(error, color = Color.Red, style = MaterialTheme.typography.bodySmall)
-        }
-        Spacer(Modifier.height(20.dp))
-        Button(
-            onClick = { onLogin(email.trim(), password) },
-            enabled = !loading && email.isNotBlank() && password.isNotBlank(),
-            modifier = Modifier.fillMaxWidth().height(50.dp)
-        ) {
-            if (loading) CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White)
-            else Text("Login")
+        Spacer(Modifier.height(Spacing.XL))
+        GlassCard {
+            GlassInput(email, { email = it }, "Email", KeyboardOptions(keyboardType = KeyboardType.Email))
+            Spacer(Modifier.height(Spacing.MD))
+            GlassInput(password, { password = it }, "Password", KeyboardOptions(keyboardType = KeyboardType.Password), PasswordVisualTransformation())
+            if (error != null) {
+                Spacer(Modifier.height(Spacing.SM))
+                Text(error, color = RiderColors.Red, fontSize = 12.sp)
+            }
+            Spacer(Modifier.height(Spacing.LG))
+            GlassButton(
+                if (loading) "Signing in..." else "Login", { onLogin(email.trim(), password) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !loading && email.isNotBlank() && password.isNotBlank()
+            )
         }
     }
 }
 
+// ───────────────────────────── Shell (tabs) ─────────────────────────────
+
 @Composable
-fun OrdersScreen(restaurantId: String, firestore: FirebaseFirestore, onLogout: () -> Unit) {
-    val context = androidx.compose.ui.platform.LocalContext.current
+fun RiderShell(restaurantId: String, firestore: FirebaseFirestore, onLogout: () -> Unit) {
+    val context = LocalContext.current
+    val myId = remember { RiderPrefs.riderId(context) }
+
     var orders by remember { mutableStateOf<List<DeliveryOrder>>(emptyList()) }
-    var activeOrderId by remember { mutableStateOf<String?>(null) }
-    var selected by remember { mutableStateOf<DeliveryOrder?>(null) }
+    var online by remember { mutableStateOf(RiderPrefs.online(context)) }
+    var tab by remember { mutableStateOf(0) }
+    var selectedId by remember { mutableStateOf<String?>(null) }
+    var restaurantName by remember { mutableStateOf("Restaurant") }
+    var currency by remember { mutableStateOf("PKR") }
+    var riderName by remember { mutableStateOf(RiderPrefs.riderName(context)) }
+    var rate by remember { mutableStateOf(RiderPrefs.ratePerDelivery(context)) }
+
+    LaunchedEffect(restaurantId) {
+        runCatching {
+            val d = firestore.collection("restaurants").document(restaurantId).get().await2()
+            d?.getString("name")?.takeIf { it.isNotBlank() }?.let { restaurantName = it }
+            d?.getString("currency")?.takeIf { it.isNotBlank() }?.let { currency = it }
+        }
+    }
 
     DisposableEffect(restaurantId) {
-        val reg: ListenerRegistration = firestore.collection("restaurants").document(restaurantId)
+        val reg = firestore.collection("restaurants").document(restaurantId)
             .collection("orders")
             .whereEqualTo("orderType", "DELIVERY")
             .addSnapshotListener { snap, _ ->
                 if (snap == null) return@addSnapshotListener
-                val activeStatuses = setOf("NEW", "PREPARING", "READY")
-                orders = snap.documents.filter { (it.getString("status") ?: "") in activeStatuses }.map { d ->
+                orders = snap.documents.map { d ->
                     val loc = d.get("deliveryLocation") as? Map<*, *>
                     val items = (d.get("items") as? List<*>)?.mapNotNull { it as? Map<*, *> }
                         ?.joinToString(", ") { "${(it["quantity"] as? Number)?.toInt() ?: 1}x ${it["name"] ?: ""}" } ?: ""
@@ -198,101 +222,330 @@ fun OrdersScreen(restaurantId: String, firestore: FirebaseFirestore, onLogout: (
                         customerPhone = d.getString("customerPhone") ?: "",
                         customerAddress = d.getString("customerAddress") ?: "",
                         status = d.getString("status") ?: "",
-                        total = (d.getDouble("total")) ?: 0.0,
+                        riderStatus = d.getString("riderStatus") ?: "",
+                        riderId = d.getString("riderId") ?: "",
+                        riderName = d.getString("riderName") ?: "",
+                        total = d.getDouble("total") ?: 0.0,
                         itemsSummary = items,
                         deliveryLat = (loc?.get("lat") as? Number)?.toDouble(),
-                        deliveryLng = (loc?.get("lng") as? Number)?.toDouble()
+                        deliveryLng = (loc?.get("lng") as? Number)?.toDouble(),
+                        createdAt = (d.get("createdAt") as? Number)?.toLong() ?: 0L,
+                        deliveredAt = (d.get("deliveredAt") as? Number)?.toLong() ?: 0L
                     )
-                }.sortedBy { it.orderNumber }
+                }
             }
         onDispose { reg.remove() }
     }
 
+    val myActive = orders.firstOrNull {
+        it.riderId == myId && it.riderStatus in ACTIVE_RIDER_STATUSES && it.status != "COMPLETED" && it.status != "CANCELLED"
+    }
+    val available = orders
+        .filter { (it.status == "NEW" || it.status == "PREPARING" || it.status == "READY") && it.riderStatus.isBlank() }
+        .sortedBy { it.createdAt }
+    val doneToday = orders.filter {
+        it.riderId == myId && it.riderStatus == "DELIVERED" && isToday(if (it.deliveredAt > 0) it.deliveredAt else it.createdAt)
+    }
+
+    // If the app was reopened mid-delivery, make sure location sharing is running again.
+    LaunchedEffect(myActive?.id) {
+        if (myActive != null) LocationUpdateService.start(context, restaurantId, myActive.id, myActive.orderNumber)
+    }
+
+    fun advance(order: DeliveryOrder, newStatus: String) {
+        val data = mutableMapOf<String, Any>(
+            "riderStatus" to newStatus,
+            "riderId" to myId,
+            "riderName" to riderName.ifBlank { "Rider" },
+            "riderUpdatedAt" to System.currentTimeMillis()
+        )
+        if (newStatus == "DELIVERED") {
+            data["status"] = "COMPLETED"
+            data["deliveredAt"] = System.currentTimeMillis()
+        }
+        firestore.collection("restaurants").document(restaurantId)
+            .collection("orders").document(order.id).update(data)
+        if (newStatus == "ACCEPTED") LocationUpdateService.start(context, restaurantId, order.id, order.orderNumber)
+        if (newStatus == "DELIVERED") LocationUpdateService.stop(context)
+    }
+
+    val selected = selectedId?.let { id -> orders.find { it.id == id } }
+    BackHandler(enabled = selected != null) { selectedId = null }
+
     if (selected != null) {
-        OrderDetailScreen(
-            order = selected!!,
+        DeliveryDetailScreen(
+            order = selected,
             restaurantId = restaurantId,
+            restaurantName = restaurantName,
+            currency = currency,
             firestore = firestore,
-            isActiveDelivery = activeOrderId == selected!!.id,
-            hasAnotherActiveDelivery = activeOrderId != null && activeOrderId != selected!!.id,
-            onBack = { selected = null },
-            onStartDelivery = {
-                activeOrderId = selected!!.id
-                LocationUpdateService.start(context, restaurantId, selected!!.id, selected!!.orderNumber)
-            },
-            onMarkDelivered = {
-                firestore.collection("restaurants").document(restaurantId)
-                    .collection("orders").document(selected!!.id)
-                    .update("status", "COMPLETED")
-                LocationUpdateService.stop(context)
-                activeOrderId = null
-                selected = null
-            }
+            myId = myId,
+            online = online,
+            hasOtherActive = myActive != null && myActive.id != selected.id,
+            onBack = { selectedId = null },
+            onAdvance = { status -> advance(selected, status) }
         )
         return
     }
 
+    val navItems = listOf(
+        NavItem("Home", Icons.Default.Home),
+        NavItem("Orders", Icons.Default.ListAlt),
+        NavItem("Map", Icons.Default.Map),
+        NavItem("Earnings", Icons.Default.AccountBalanceWallet),
+        NavItem("Profile", Icons.Default.Person)
+    )
+
     Column(Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = { Text("Deliveries (${orders.size})") },
-            actions = {
-                IconButton(onClick = onLogout) { Icon(Icons.Default.Logout, contentDescription = "Logout") }
-            }
-        )
-        if (orders.isEmpty()) {
-            Box(Modifier.fillMaxSize(), Alignment.Center) {
-                Text("No delivery orders right now", color = Color.Gray)
-            }
-        } else {
-            LazyColumn(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                items(orders) { order ->
-                    ElevatedCard(
-                        onClick = { selected = order },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(Modifier.padding(16.dp)) {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(order.orderNumber, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                                AssistChip(onClick = {}, label = { Text(order.status) })
-                            }
-                            Spacer(Modifier.height(6.dp))
-                            Text(order.customerName, fontWeight = FontWeight.Medium)
-                            Text(order.customerAddress, color = Color.Gray, style = MaterialTheme.typography.bodySmall, maxLines = 2)
-                            if (activeOrderId == order.id) {
-                                Spacer(Modifier.height(6.dp))
-                                Text("📍 Sharing live location", color = Color(0xFF2E7D32), style = MaterialTheme.typography.labelMedium)
-                            }
-                        }
-                    }
+        Box(Modifier.weight(1f)) {
+            Crossfade(targetState = tab, label = "tabs") { t ->
+                when (t) {
+                    0 -> HomeTab(
+                        riderName = riderName, restaurantName = restaurantName, online = online,
+                        onToggleOnline = { online = !online; RiderPrefs.setOnline(context, online) },
+                        myActive = myActive, availableCount = available.size,
+                        doneCount = doneToday.size, earnings = doneToday.size * rate, currency = currency,
+                        distanceM = RiderPrefs.distanceTodayM(context),
+                        onOpenActive = { myActive?.let { selectedId = it.id } },
+                        onSeeOrders = { tab = 1 }
+                    )
+                    1 -> OrdersTab(available, myActive, online, currency) { selectedId = it.id }
+                    2 -> MapTab(myActive, restaurantId, firestore) { myActive?.let { selectedId = it.id } }
+                    3 -> EarningsTab(doneToday, rate, currency)
+                    else -> ProfileTab(
+                        riderName = riderName, rate = rate, currency = currency,
+                        onSave = { name, r ->
+                            riderName = name; rate = r
+                            RiderPrefs.setRiderName(context, name); RiderPrefs.setRate(context, r)
+                        },
+                        onLogout = onLogout
+                    )
                 }
+            }
+        }
+        GlassBottomNavigation(navItems, tab) { tab = it }
+    }
+}
+
+// ───────────────────────────── Tabs ─────────────────────────────
+
+@Composable
+fun HomeTab(
+    riderName: String, restaurantName: String, online: Boolean, onToggleOnline: () -> Unit,
+    myActive: DeliveryOrder?, availableCount: Int, doneCount: Int, earnings: Double, currency: String,
+    distanceM: Double, onOpenActive: () -> Unit, onSeeOrders: () -> Unit
+) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = Spacing.LG)) {
+        GlassTopBar(
+            title = if (riderName.isBlank()) "Hello, Rider" else "Hello, $riderName",
+            subtitle = restaurantName
+        )
+        Column(Modifier.padding(horizontal = Spacing.LG), verticalArrangement = Arrangement.spacedBy(Spacing.MD)) {
+            GlassCard(Modifier.fillMaxWidth(), accent = online) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(12.dp).background(if (online) RiderColors.Green else RiderColors.TextTertiary, CircleShape))
+                    Spacer(Modifier.width(Spacing.SM))
+                    Text(
+                        if (online) "ONLINE" else "OFFLINE", color = RiderColors.TextPrimary,
+                        fontWeight = FontWeight.Bold, fontSize = 18.sp
+                    )
+                }
+                Text(
+                    if (online) "You can accept new deliveries." else "Go online to start accepting deliveries.",
+                    color = RiderColors.TextSecondary, fontSize = 13.sp
+                )
+                Spacer(Modifier.height(Spacing.MD))
+                GlassButton(
+                    if (online) "GO OFFLINE" else "GO ONLINE", onToggleOnline,
+                    modifier = Modifier.fillMaxWidth(), icon = Icons.Default.PowerSettingsNew,
+                    tint = if (online) RiderColors.Deep else RiderColors.Blue, height = 64.dp
+                )
+            }
+
+            if (myActive != null) {
+                GlassCard(Modifier.fillMaxWidth(), accent = true, onClick = onOpenActive) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Active Delivery", color = RiderColors.Cyan, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        GlassStatusBadge(riderStatusLabel(myActive.riderStatus), RiderColors.Cyan)
+                    }
+                    Spacer(Modifier.height(Spacing.SM))
+                    Text(myActive.orderNumber, color = RiderColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                    Text(myActive.customerName, color = RiderColors.TextPrimary)
+                    Text(myActive.customerAddress, color = RiderColors.TextSecondary, fontSize = 13.sp, maxLines = 2)
+                }
+            } else {
+                GlassCard(Modifier.fillMaxWidth(), onClick = onSeeOrders) {
+                    Text("Active Delivery", color = RiderColors.TextSecondary, fontSize = 13.sp)
+                    Text("None right now", color = RiderColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text(
+                        if (availableCount > 0) "$availableCount new deliveries waiting - tap to view" else "New deliveries will appear here.",
+                        color = RiderColors.TextSecondary, fontSize = 13.sp
+                    )
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.MD)) {
+                GlassStatCard("Today's Deliveries", "${doneCount + if (myActive != null) 1 else 0}", Icons.Default.DeliveryDining, Modifier.weight(1f))
+                GlassStatCard("Completed Orders", "$doneCount", Icons.Default.CheckCircle, Modifier.weight(1f), RiderColors.Green)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.MD)) {
+                GlassStatCard("Today's Earnings", "$currency ${earnings.toInt()}", Icons.Default.AccountBalanceWallet, Modifier.weight(1f))
+                GlassStatCard("Distance", formatKm(distanceM), Icons.Default.Navigation, Modifier.weight(1f), RiderColors.Cyan)
             }
         }
     }
 }
 
 @Composable
-fun OrderDetailScreen(
-    order: DeliveryOrder,
-    restaurantId: String,
-    firestore: FirebaseFirestore,
-    isActiveDelivery: Boolean,
-    hasAnotherActiveDelivery: Boolean,
-    onBack: () -> Unit,
-    onStartDelivery: () -> Unit,
-    onMarkDelivered: () -> Unit
-) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-
-    val customerPoint = remember(order.deliveryLat, order.deliveryLng) {
-        if (order.deliveryLat != null && order.deliveryLng != null) GeoPoint(order.deliveryLat, order.deliveryLng) else null
+fun OrdersTab(available: List<DeliveryOrder>, myActive: DeliveryOrder?, online: Boolean, currency: String, onOpen: (DeliveryOrder) -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        GlassTopBar("Orders", "${available.size} available")
+        Column(
+            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Spacing.LG),
+            verticalArrangement = Arrangement.spacedBy(Spacing.MD)
+        ) {
+            if (!online) {
+                GlassCard(Modifier.fillMaxWidth()) {
+                    Text("You are offline. Go online from Home to accept deliveries.", color = RiderColors.Amber, fontSize = 13.sp)
+                }
+            }
+            myActive?.let { GlassOrderCard(it, currency, highlight = true) { onOpen(it) } }
+            if (available.isEmpty() && myActive == null) {
+                Box(Modifier.fillMaxWidth().padding(top = 60.dp), Alignment.Center) {
+                    Text("No delivery orders right now", color = RiderColors.TextTertiary)
+                }
+            }
+            available.forEach { GlassOrderCard(it, currency) { onOpen(it) } }
+            Spacer(Modifier.height(Spacing.LG))
+        }
     }
+}
 
-    // Rider position: the phone's own last known location before the delivery starts, and the
-    // live location stored on the order (the same one the customer sees) once it is active.
+@Composable
+fun GlassOrderCard(order: DeliveryOrder, currency: String, highlight: Boolean = false, onClick: () -> Unit) {
+    GlassCard(Modifier.fillMaxWidth(), accent = highlight, onClick = onClick) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(order.orderNumber, color = RiderColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 18.sp, modifier = Modifier.weight(1f))
+            if (order.riderStatus.isNotBlank()) GlassStatusBadge(riderStatusLabel(order.riderStatus), RiderColors.Cyan)
+            else GlassStatusBadge("New Delivery", RiderColors.Blue)
+        }
+        Spacer(Modifier.height(Spacing.SM))
+        Text(order.customerName, color = RiderColors.TextPrimary, fontWeight = FontWeight.Medium)
+        Text(order.customerAddress, color = RiderColors.TextSecondary, fontSize = 13.sp, maxLines = 2)
+        Spacer(Modifier.height(Spacing.SM))
+        Row {
+            Text(order.itemsSummary, color = RiderColors.TextTertiary, fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
+            Text("$currency ${order.total.toInt()}", color = RiderColors.Cyan, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+fun MapTab(myActive: DeliveryOrder?, restaurantId: String, firestore: FirebaseFirestore, onOpenDetails: () -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        GlassTopBar("Map", if (myActive != null) "Delivery ${myActive.orderNumber}" else null)
+        if (myActive == null) {
+            Box(Modifier.fillMaxSize().padding(Spacing.LG), Alignment.TopCenter) {
+                GlassCard(Modifier.fillMaxWidth()) {
+                    Text("No active delivery", color = RiderColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text("Accept a delivery from the Orders tab to see the live route to your customer here.", color = RiderColors.TextSecondary, fontSize = 13.sp)
+                }
+            }
+        } else {
+            Column(Modifier.padding(horizontal = Spacing.LG)) {
+                RouteMap(myActive, restaurantId, firestore, isSharing = true, mapHeight = 460.dp)
+                Spacer(Modifier.height(Spacing.MD))
+                GlassButton("Delivery Details", onOpenDetails, modifier = Modifier.fillMaxWidth(), primary = false)
+            }
+        }
+    }
+}
+
+@Composable
+fun EarningsTab(done: List<DeliveryOrder>, rate: Double, currency: String) {
+    Column(Modifier.fillMaxSize()) {
+        GlassTopBar("Earnings", "Today")
+        Column(
+            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Spacing.LG),
+            verticalArrangement = Arrangement.spacedBy(Spacing.MD)
+        ) {
+            GlassCard(Modifier.fillMaxWidth(), accent = true) {
+                Text("Total earned today", color = RiderColors.TextSecondary, fontSize = 13.sp)
+                Text("$currency ${(done.size * rate).toInt()}", color = RiderColors.Cyan, fontWeight = FontWeight.Bold, fontSize = 34.sp)
+                Text("${done.size} deliveries", color = RiderColors.TextSecondary, fontSize = 13.sp)
+                if (rate <= 0.0) {
+                    Spacer(Modifier.height(Spacing.SM))
+                    Text("Set your rate per delivery in Profile to see earnings.", color = RiderColors.Amber, fontSize = 12.sp)
+                }
+            }
+            if (done.isEmpty()) {
+                Text("Completed deliveries will show up here.", color = RiderColors.TextTertiary)
+            }
+            done.sortedByDescending { it.deliveredAt }.forEach { o ->
+                GlassCard(Modifier.fillMaxWidth()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(o.orderNumber, color = RiderColors.TextPrimary, fontWeight = FontWeight.Bold)
+                            Text(o.customerName, color = RiderColors.TextSecondary, fontSize = 13.sp)
+                        }
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text("$currency ${rate.toInt()}", color = RiderColors.Cyan, fontWeight = FontWeight.Bold)
+                            Text("Order $currency ${o.total.toInt()}", color = RiderColors.TextTertiary, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(Spacing.LG))
+        }
+    }
+}
+
+@Composable
+fun ProfileTab(riderName: String, rate: Double, currency: String, onSave: (String, Double) -> Unit, onLogout: () -> Unit) {
+    var name by remember { mutableStateOf(riderName) }
+    var rateText by remember { mutableStateOf(if (rate > 0) rate.toInt().toString() else "") }
+    var saved by remember { mutableStateOf(false) }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        GlassTopBar("Profile")
+        Column(Modifier.padding(horizontal = Spacing.LG), verticalArrangement = Arrangement.spacedBy(Spacing.MD)) {
+            GlassCard(Modifier.fillMaxWidth()) {
+                GlassInput(name, { name = it; saved = false }, "Your name")
+                Spacer(Modifier.height(Spacing.MD))
+                GlassInput(rateText, { rateText = it.filter { c -> c.isDigit() }; saved = false }, "Earning per delivery ($currency)", KeyboardOptions(keyboardType = KeyboardType.Number))
+                Spacer(Modifier.height(Spacing.LG))
+                GlassButton(if (saved) "Saved" else "Save", {
+                    onSave(name.trim(), rateText.toDoubleOrNull() ?: 0.0); saved = true
+                }, modifier = Modifier.fillMaxWidth())
+            }
+            GlassButton("Logout", onLogout, modifier = Modifier.fillMaxWidth(), icon = Icons.Default.Logout, primary = false)
+        }
+    }
+}
+
+// ───────────────────────────── Delivery detail ─────────────────────────────
+
+fun riderStatusLabel(s: String) = when (s) {
+    "ACCEPTED" -> "Accepted"
+    "ARRIVED" -> "At Restaurant"
+    "PICKED_UP" -> "Picked Up"
+    "ON_THE_WAY" -> "On the Way"
+    "DELIVERED" -> "Delivered"
+    else -> "New Delivery"
+}
+
+@Composable
+fun RouteMap(order: DeliveryOrder, restaurantId: String, firestore: FirebaseFirestore, isSharing: Boolean, mapHeight: androidx.compose.ui.unit.Dp) {
+    val context = LocalContext.current
+    val customerPoint = remember(order.deliveryLat, order.deliveryLng) {
+        val la = order.deliveryLat
+        val ln = order.deliveryLng
+        if (la != null && ln != null) GeoPoint(la, ln) else null
+    }
     var myPoint by remember { mutableStateOf<GeoPoint?>(null) }
     var livePoint by remember { mutableStateOf<GeoPoint?>(null) }
 
-    LaunchedEffect(isActiveDelivery) {
+    LaunchedEffect(order.id) {
         val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         if (granted) {
@@ -302,7 +555,6 @@ fun OrderDetailScreen(
             }
         }
     }
-
     DisposableEffect(order.id) {
         val reg = firestore.collection("restaurants").document(restaurantId)
             .collection("orders").document(order.id)
@@ -315,9 +567,8 @@ fun OrderDetailScreen(
         onDispose { reg.remove() }
     }
 
-    val riderPoint = if (isActiveDelivery) (livePoint ?: myPoint) else myPoint
+    val riderPoint = if (isSharing) (livePoint ?: myPoint) else myPoint
 
-    // Road route rider -> customer; refreshed when the rider has moved more than ~150 m.
     var routeInfo by remember { mutableStateOf<RouteInfo?>(null) }
     var routeFrom by remember { mutableStateOf<GeoPoint?>(null) }
     LaunchedEffect(riderPoint, customerPoint) {
@@ -332,106 +583,137 @@ fun OrderDetailScreen(
         }
     }
 
-    val distanceText = run {
-        val r = riderPoint
-        val c = customerPoint
-        if (r == null || c == null) null else {
-            val meters = routeInfo?.distanceM ?: r.distanceToAsDouble(c)
-            val minutes = routeInfo?.durationS?.let { (it / 60).toInt().coerceAtLeast(1) }
-            val km = if (meters >= 1000) String.format("%.1f km", meters / 1000) else "${meters.toInt()} m"
-            if (minutes != null) "$km  •  about $minutes min" else km
+    if (customerPoint == null) {
+        GlassCard(Modifier.fillMaxWidth()) {
+            Text(
+                "This customer did not pin a location - use the written address below.",
+                color = RiderColors.Amber, fontSize = 13.sp
+            )
         }
+        return
     }
 
-    Column(Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = { Text("Order ${order.orderNumber}") },
-            navigationIcon = {
-                IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") }
-            }
+    val r = riderPoint
+    val meters = if (r != null) (routeInfo?.distanceM ?: r.distanceToAsDouble(customerPoint)) else null
+    val minutes = routeInfo?.durationS?.let { (it / 60).toInt().coerceAtLeast(1) }
+
+    Column {
+        LiveMap(
+            modifier = Modifier.fillMaxWidth().height(mapHeight).clipToShape(),
+            customer = customerPoint, rider = riderPoint, route = routeInfo?.points ?: emptyList()
         )
-
-        if (customerPoint != null) {
-            LiveMap(
-                modifier = Modifier.fillMaxWidth().height(280.dp),
-                customer = customerPoint,
-                rider = riderPoint,
-                route = routeInfo?.points ?: emptyList()
-            )
-            if (distanceText != null) {
-                Text(
-                    "To customer: $distanceText",
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF1E88E5)
-                )
+        if (meters != null) {
+            Spacer(Modifier.height(Spacing.SM))
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.MD)) {
+                GlassStatCard("Distance to customer", formatKm(meters), Icons.Default.Navigation, Modifier.weight(1f), RiderColors.Cyan)
+                GlassStatCard("ETA", if (minutes != null) "$minutes min" else "-", Icons.Default.Place, Modifier.weight(1f))
             }
-        } else {
-            Text(
-                "This customer did not pin a location - only the written address is available below.",
-                modifier = Modifier.fillMaxWidth().padding(20.dp),
-                color = Color(0xFFB26A00),
-                style = MaterialTheme.typography.bodySmall
-            )
         }
+    }
+}
 
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 8.dp)) {
-            Text(order.customerName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text(order.customerPhone, color = Color.Gray)
-            Spacer(Modifier.height(8.dp))
-            Text(order.customerAddress, style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.height(12.dp))
-            Divider()
-            Spacer(Modifier.height(12.dp))
-            Text("Items", fontWeight = FontWeight.Bold)
-            Text(order.itemsSummary, color = Color.Gray, style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.height(8.dp))
-            Text("Total: ${order.total}", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+@Composable
+fun DeliveryDetailScreen(
+    order: DeliveryOrder,
+    restaurantId: String,
+    restaurantName: String,
+    currency: String,
+    firestore: FirebaseFirestore,
+    myId: String,
+    online: Boolean,
+    hasOtherActive: Boolean,
+    onBack: () -> Unit,
+    onAdvance: (String) -> Unit
+) {
+    val context = LocalContext.current
+    val mine = order.riderId == myId
+    val takenByOther = order.riderStatus.isNotBlank() && !mine
+    val sharing = mine && order.riderStatus in ACTIVE_RIDER_STATUSES
 
-            Spacer(Modifier.height(16.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
-                    onClick = {
-                        val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${order.customerPhone}"))
-                        context.startActivity(intent)
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Icon(Icons.Default.Call, contentDescription = null); Spacer(Modifier.width(6.dp)); Text("Call") }
+    Column(Modifier.fillMaxSize()) {
+        GlassTopBar("Order ${order.orderNumber}", riderStatusLabel(order.riderStatus), onBack = onBack)
+        Column(
+            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Spacing.LG),
+            verticalArrangement = Arrangement.spacedBy(Spacing.MD)
+        ) {
+            RouteMap(order, restaurantId, firestore, isSharing = sharing, mapHeight = 260.dp)
 
-                OutlinedButton(
-                    onClick = {
-                        val uri = if (order.deliveryLat != null && order.deliveryLng != null) {
-                            Uri.parse("geo:${order.deliveryLat},${order.deliveryLng}?q=${order.deliveryLat},${order.deliveryLng}(${Uri.encode(order.customerName)})")
-                        } else {
-                            Uri.parse("geo:0,0?q=${Uri.encode(order.customerAddress)}")
-                        }
-                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Icon(Icons.Default.Map, contentDescription = null); Spacer(Modifier.width(6.dp)); Text("Google Maps") }
+            if (mine && order.riderStatus.isNotBlank()) StatusTimeline(order.riderStatus)
+
+            GlassCard(Modifier.fillMaxWidth()) {
+                Text("FROM", color = RiderColors.TextTertiary, fontSize = 11.sp)
+                Text(restaurantName, color = RiderColors.TextPrimary, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(Spacing.MD))
+                Text("TO", color = RiderColors.TextTertiary, fontSize = 11.sp)
+                Text(order.customerName, color = RiderColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text(order.customerPhone, color = RiderColors.TextSecondary)
+                Text(order.customerAddress, color = RiderColors.TextSecondary, fontSize = 13.sp)
+                Spacer(Modifier.height(Spacing.MD))
+                Text("ITEMS", color = RiderColors.TextTertiary, fontSize = 11.sp)
+                Text(order.itemsSummary, color = RiderColors.TextPrimary, fontSize = 13.sp)
+                Spacer(Modifier.height(Spacing.SM))
+                Text("Total: $currency ${order.total.toInt()}", color = RiderColors.Cyan, fontWeight = FontWeight.Bold, fontSize = 18.sp)
             }
 
-            Spacer(Modifier.height(16.dp))
-            if (!isActiveDelivery) {
-                Button(
-                    onClick = onStartDelivery,
-                    enabled = !hasAnotherActiveDelivery,
-                    modifier = Modifier.fillMaxWidth().height(52.dp)
-                ) { Icon(Icons.Default.PlayArrow, contentDescription = null); Spacer(Modifier.width(8.dp)); Text("Start Delivery") }
-                if (hasAnotherActiveDelivery) {
-                    Spacer(Modifier.height(6.dp))
-                    Text("Finish your current active delivery first.", color = Color.Red, style = MaterialTheme.typography.labelSmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.MD)) {
+                GlassButton("Call", {
+                    runCatching { context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:${order.customerPhone}"))) }
+                }, modifier = Modifier.weight(1f), icon = Icons.Default.Call, primary = false)
+                GlassButton("Navigate", {
+                    val uri = if (order.deliveryLat != null && order.deliveryLng != null) {
+                        Uri.parse("geo:${order.deliveryLat},${order.deliveryLng}?q=${order.deliveryLat},${order.deliveryLng}(${Uri.encode(order.customerName)})")
+                    } else {
+                        Uri.parse("geo:0,0?q=${Uri.encode(order.customerAddress)}")
+                    }
+                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                }, modifier = Modifier.weight(1f), icon = Icons.Default.Navigation, primary = false)
+            }
+
+            when {
+                takenByOther -> Text("Taken by ${order.riderName.ifBlank { "another rider" }}", color = RiderColors.Amber)
+                order.riderStatus.isBlank() -> {
+                    GlassButton(
+                        "Accept Delivery", { onAdvance("ACCEPTED") },
+                        modifier = Modifier.fillMaxWidth(), icon = Icons.Default.DeliveryDining,
+                        enabled = online && !hasOtherActive, height = 64.dp
+                    )
+                    if (!online) Text("Go online from Home first.", color = RiderColors.Amber, fontSize = 12.sp)
+                    else if (hasOtherActive) Text("Finish your current delivery first.", color = RiderColors.Amber, fontSize = 12.sp)
                 }
-            } else {
-                Text("Live location is being shared with the customer", color = Color(0xFF2E7D32), fontWeight = FontWeight.Medium)
-                Spacer(Modifier.height(12.dp))
-                Button(
-                    onClick = onMarkDelivered,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32)),
-                    modifier = Modifier.fillMaxWidth().height(52.dp)
-                ) { Icon(Icons.Default.CheckCircle, contentDescription = null); Spacer(Modifier.width(8.dp)); Text("Mark Delivered") }
+                order.riderStatus == "ACCEPTED" ->
+                    GlassButton("Arrived at Restaurant", { onAdvance("ARRIVED") }, Modifier.fillMaxWidth(), icon = Icons.Default.Storefront, height = 64.dp)
+                order.riderStatus == "ARRIVED" ->
+                    GlassButton("Picked Up Order", { onAdvance("PICKED_UP") }, Modifier.fillMaxWidth(), icon = Icons.Default.CheckCircle, height = 64.dp)
+                order.riderStatus == "PICKED_UP" ->
+                    GlassButton("Start Delivery", { onAdvance("ON_THE_WAY") }, Modifier.fillMaxWidth(), icon = Icons.Default.Navigation, height = 64.dp)
+                order.riderStatus == "ON_THE_WAY" ->
+                    GlassButton("Complete Delivery", { onAdvance("DELIVERED") }, Modifier.fillMaxWidth(), icon = Icons.Default.CheckCircle, tint = RiderColors.Green, height = 64.dp)
+                order.riderStatus == "DELIVERED" ->
+                    Text("Delivered \u2713", color = RiderColors.Green, fontWeight = FontWeight.Bold, fontSize = 18.sp)
             }
-            Spacer(Modifier.height(24.dp))
+            if (sharing) Text("Your live location is being shared with the customer.", color = RiderColors.Cyan, fontSize = 12.sp)
+            Spacer(Modifier.height(Spacing.XL))
+        }
+    }
+}
+
+@Composable
+fun StatusTimeline(current: String) {
+    val steps = listOf("ACCEPTED" to "Accepted", "ARRIVED" to "At Rest.", "PICKED_UP" to "Picked Up", "ON_THE_WAY" to "On the Way", "DELIVERED" to "Delivered")
+    val idx = steps.indexOfFirst { it.first == current }
+    GlassCard(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth()) {
+            steps.forEachIndexed { i, (_, label) ->
+                val done = i <= idx
+                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        Modifier.size(if (i == idx) 16.dp else 12.dp)
+                            .background(if (done) RiderColors.Cyan else RiderColors.GlassBorderActive, CircleShape)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(label, color = if (done) RiderColors.TextPrimary else RiderColors.TextTertiary, fontSize = 10.sp, maxLines = 1)
+                }
+            }
         }
     }
 }

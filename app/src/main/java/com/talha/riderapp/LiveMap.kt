@@ -1,7 +1,9 @@
 package com.talha.riderapp
 
 import android.graphics.drawable.GradientDrawable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -14,6 +16,7 @@ import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
+import org.osmdroid.views.overlay.TilesOverlay
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -58,6 +61,8 @@ fun LiveMap(
         MapView(context).apply {
             setTileSource(TileSourceFactory.MAPNIK)
             setMultiTouchControls(true)
+            // Dark map to match the app theme.
+            overlayManager.tilesOverlay.setColorFilter(TilesOverlay.INVERT_COLORS)
             controller.setZoom(15.0)
         }
     }
@@ -79,7 +84,7 @@ fun LiveMap(
         if (line.size > 1) {
             map.overlays.add(Polyline(map).apply {
                 setPoints(line)
-                outlinePaint.color = 0xFF1E88E5.toInt()
+                outlinePaint.color = 0xFF39C6FF.toInt()
                 outlinePaint.strokeWidth = 12f
             })
         }
@@ -93,7 +98,7 @@ fun LiveMap(
         rider?.let {
             val dot = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(0xFF1E88E5.toInt())
+                setColor(0xFF18A8FF.toInt())
                 setStroke(6, 0xFFFFFFFF.toInt())
                 setSize(48, 48)
             }
@@ -121,3 +126,6 @@ fun LiveMap(
         map.invalidate()
     })
 }
+
+/** Rounded corners for the map, matching the glass cards. */
+fun Modifier.clipToShape(): Modifier = this.clip(RoundedCornerShape(Radius.ExtraLarge))
