@@ -3,6 +3,8 @@ package com.talha.riderapp
 import android.app.Application
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
+import org.osmdroid.config.Configuration
+import java.io.File
 
 /**
  * Initializes Firebase by hand with the exact same project config used by the website
@@ -17,6 +19,12 @@ import com.google.firebase.FirebaseOptions
 class RiderApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        // Map tiles are cached in the app's own cache dir, so no storage permission is needed.
+        Configuration.getInstance().apply {
+            userAgentValue = packageName
+            osmdroidBasePath = File(cacheDir, "osmdroid")
+            osmdroidTileCache = File(cacheDir, "osmdroid/tiles")
+        }
         if (FirebaseApp.getApps(this).isEmpty()) {
             val options = FirebaseOptions.Builder()
                 .setApiKey("AIzaSyAfB61zHgxWxnzbWOvFPVhvn0Yz9ejZ9-A")

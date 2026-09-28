@@ -57,5 +57,8 @@ dependencies {
     implementation("com.google.firebase:firebase-firestore-ktx")
 
     implementation("com.google.android.gms:play-services-location:21.3.0")
+
+    // Free OpenStreetMap-based map (same map data the website uses) — needs NO API key.
+    implementation("org.osmdroid:osmdroid-android:6.1.18")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
 }

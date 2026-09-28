@@ -13,6 +13,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
@@ -28,9 +30,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.google.android.gms.location.LocationServices
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
+import org.osmdroid.util.GeoPoint
 
 data class DeliveryOrder(
     val id: String = "",
@@ -279,6 +283,66 @@ fun OrderDetailScreen(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
 
+    val customerPoint = remember(order.deliveryLat, order.deliveryLng) {
+        if (order.deliveryLat != null && order.deliveryLng != null) GeoPoint(order.deliveryLat, order.deliveryLng) else null
+    }
+
+    // Rider position: the phone's own last known location before the delivery starts, and the
+    // live location stored on the order (the same one the customer sees) once it is active.
+    var myPoint by remember { mutableStateOf<GeoPoint?>(null) }
+    var livePoint by remember { mutableStateOf<GeoPoint?>(null) }
+
+    LaunchedEffect(isActiveDelivery) {
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            runCatching {
+                LocationServices.getFusedLocationProviderClient(context).lastLocation
+                    .addOnSuccessListener { loc -> if (loc != null) myPoint = GeoPoint(loc.latitude, loc.longitude) }
+            }
+        }
+    }
+
+    DisposableEffect(order.id) {
+        val reg = firestore.collection("restaurants").document(restaurantId)
+            .collection("orders").document(order.id)
+            .addSnapshotListener { snap, _ ->
+                val ll = snap?.get("liveLocation") as? Map<*, *>
+                val lat = (ll?.get("lat") as? Number)?.toDouble()
+                val lng = (ll?.get("lng") as? Number)?.toDouble()
+                if (lat != null && lng != null) livePoint = GeoPoint(lat, lng)
+            }
+        onDispose { reg.remove() }
+    }
+
+    val riderPoint = if (isActiveDelivery) (livePoint ?: myPoint) else myPoint
+
+    // Road route rider -> customer; refreshed when the rider has moved more than ~150 m.
+    var routeInfo by remember { mutableStateOf<RouteInfo?>(null) }
+    var routeFrom by remember { mutableStateOf<GeoPoint?>(null) }
+    LaunchedEffect(riderPoint, customerPoint) {
+        val r = riderPoint
+        val c = customerPoint
+        if (r != null && c != null) {
+            val last = routeFrom
+            if (last == null || last.distanceToAsDouble(r) > 150.0) {
+                routeFrom = r
+                fetchRoute(r, c)?.let { routeInfo = it }
+            }
+        }
+    }
+
+    val distanceText = run {
+        val r = riderPoint
+        val c = customerPoint
+        if (r == null || c == null) null else {
+            val meters = routeInfo?.distanceM ?: r.distanceToAsDouble(c)
+            val minutes = routeInfo?.durationS?.let { (it / 60).toInt().coerceAtLeast(1) }
+            val km = if (meters >= 1000) String.format("%.1f km", meters / 1000) else "${meters.toInt()} m"
+            if (minutes != null) "$km  •  about $minutes min" else km
+        }
+    }
+
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
             title = { Text("Order ${order.orderNumber}") },
@@ -286,20 +350,45 @@ fun OrderDetailScreen(
                 IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") }
             }
         )
-        Column(Modifier.fillMaxSize().padding(20.dp)) {
+
+        if (customerPoint != null) {
+            LiveMap(
+                modifier = Modifier.fillMaxWidth().height(280.dp),
+                customer = customerPoint,
+                rider = riderPoint,
+                route = routeInfo?.points ?: emptyList()
+            )
+            if (distanceText != null) {
+                Text(
+                    "To customer: $distanceText",
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF1E88E5)
+                )
+            }
+        } else {
+            Text(
+                "This customer did not pin a location - only the written address is available below.",
+                modifier = Modifier.fillMaxWidth().padding(20.dp),
+                color = Color(0xFFB26A00),
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 8.dp)) {
             Text(order.customerName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Text(order.customerPhone, color = Color.Gray)
             Spacer(Modifier.height(8.dp))
             Text(order.customerAddress, style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
             Divider()
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
             Text("Items", fontWeight = FontWeight.Bold)
             Text(order.itemsSummary, color = Color.Gray, style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(8.dp))
             Text("Total: ${order.total}", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
 
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(16.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
                     onClick = {
@@ -319,10 +408,10 @@ fun OrderDetailScreen(
                         runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
                     },
                     modifier = Modifier.weight(1f)
-                ) { Icon(Icons.Default.Map, contentDescription = null); Spacer(Modifier.width(6.dp)); Text("Navigate") }
+                ) { Icon(Icons.Default.Map, contentDescription = null); Spacer(Modifier.width(6.dp)); Text("Google Maps") }
             }
 
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(16.dp))
             if (!isActiveDelivery) {
                 Button(
                     onClick = onStartDelivery,
@@ -334,7 +423,7 @@ fun OrderDetailScreen(
                     Text("Finish your current active delivery first.", color = Color.Red, style = MaterialTheme.typography.labelSmall)
                 }
             } else {
-                Text("📍 Live location is being shared with the customer", color = Color(0xFF2E7D32), fontWeight = FontWeight.Medium)
+                Text("Live location is being shared with the customer", color = Color(0xFF2E7D32), fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(12.dp))
                 Button(
                     onClick = onMarkDelivered,
@@ -342,6 +431,7 @@ fun OrderDetailScreen(
                     modifier = Modifier.fillMaxWidth().height(52.dp)
                 ) { Icon(Icons.Default.CheckCircle, contentDescription = null); Spacer(Modifier.width(8.dp)); Text("Mark Delivered") }
             }
+            Spacer(Modifier.height(24.dp))
         }
     }
 }
